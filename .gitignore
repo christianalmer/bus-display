@@ -1,0 +1,11 @@
+# Real credentials — never commit (use bus_display/secrets.h.example)
+bus_display/secrets.h
+
+# Claude Code local settings (approved commands can contain the API key)
+.claude/
+
+# Build artifacts
+bus_display/build/
+preview/*.png
+
+.DS_Store
