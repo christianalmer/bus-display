@@ -32,10 +32,15 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
     Predictions win for their trip; schedule fills the untracked gaps.
   - The 511 StopTimetable endpoint always returns HTTP 412 (broken/gated) — that's
     why the schedule is baked in rather than fetched.
-  - **schedule.h expires**: GTFS covers ~5 weeks per Muni signup (current table ends
-    2026-08-28). Refresh with `tools/update_schedule.sh` (regenerates schedule.h from
-    fresh GTFS, recompiles, reflashes — board must be plugged in). After expiry the
-    firmware logs a warning and falls back to predictions-only.
+  - **Schedule stays fresh automatically**: a GitHub Actions cron
+    (`.github/workflows/refresh-schedule.yml`, Mondays ~4am Pacific, 511 key in repo
+    secret `API_KEY_511`) regenerates `schedule.json` + `schedule.h`; the device
+    downloads `schedule.json` from raw.githubusercontent.com daily (hourly retry on
+    failure), caches it in NVS, and falls back to the baked-in `schedule.h`.
+    `tools/update_schedule.sh` still works for manual USB refresh.
+  - Repo: github.com/christianalmer/bus-display (public — secrets live in gitignored
+    `bus_display/secrets.h`; `.claude/` is gitignored too since approved commands
+    embed the API key). Push via SSH.
 
 ## Behavior
 
