@@ -183,7 +183,8 @@ def main():
 
     OUT_JSON.write_text(json.dumps({
         "v": 1,
-        "generated": datetime.date.today().isoformat(),
+        # no "generated" timestamp: the file must be byte-identical when the
+        # schedule is unchanged, so the weekly CI commit-if-changed is a no-op
         "stop": STOP_ID,
         "line": ROUTE_ID,
         "valid": f"{first}..{last}",
