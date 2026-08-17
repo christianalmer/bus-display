@@ -64,7 +64,7 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
 
 **WORKING — flashed and verified on hardware 2026-08-11.** Sketch lives in `bus_display/` (folder name must match .ino for arduino-cli). Stack: Arduino (esp32 core 3.3.11), **shared `crowpanel-epd` library** (drivers + `epdCanvasToPanel()` + preview harness; cloned at `~/Documents/Arduino/libraries/crowpanel-epd`, repo github.com/christianalmer/crowpanel-epd — edit there, push once, all display projects pick it up) + Adafruit GFX (GFXcanvas1) + ArduinoJson (v7), gzip inflate via `tinfl_decompress_mem_to_mem` (in ESP32-S3 ROM, `#include "miniz.h"` — NOT `rom/miniz.h`, which doesn't exist on the S3 core).
 
-**2026-08-17: hardware layer extracted to the crowpanel-epd library** (shared with bike-display). Library-based build compiles clean but is NOT yet flashed — board wasn't plugged in. Flash + verify next time it's connected (no behavior change expected; same code, new home).
+**2026-08-17: hardware layer extracted to the crowpanel-epd library** (shared with bike-display). Library-based build flashed and verified on hardware same day.
 
 **GxEPD2 was tried and dropped** (still installed as a library, unused): `GxEPD2_213_BN` full refresh worked but partial refresh ghosted badly — that class uploads a custom LUT tuned for DEPG0213BN glass, which doesn't match this panel. `epd1680.cpp` follows Elecrow's own flow: partial refresh via the panel's factory OTP Mode-2 waveform (`0x22 = 0xFC`), previous frame maintained in RAM 0x26 after every refresh, deep-sleep mode 1 between updates (retains RAM, so the diff base survives).
 
