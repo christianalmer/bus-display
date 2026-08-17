@@ -58,11 +58,13 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
 - Bottom right: second departure ("next: 22 min")
 - Fonts: Adafruit GFX FreeSansBold24pt / 12pt / FreeSans9pt
 - Composition horizontally centered on the widest state ("NOW", 117px): badge x=27 (its "23" at x=32; glyphs 52px wide), text column x=105. Shared baselines: badge "23" / big number / NOW / No buses at y=77; bottom line at y=112
-- **Iterate on layout with `preview/preview.py`** — parses the real Adafruit GFX font headers and replicates render() pixel-for-pixel into PNGs (no flashing needed). `draw_layout_v2` is the version in firmware; keep them in sync
+- **Iterate on layout with `preview/preview.py`** — replicates render() pixel-for-pixel into PNGs (no flashing needed). The font/canvas/PNG harness lives in the crowpanel-epd library (`preview/epd_preview.py`); this project's file holds only `draw_layout_v2`, which must stay in sync with firmware render()
 
 ## Firmware status
 
-**WORKING — flashed and verified on hardware 2026-08-11.** Sketch lives in `bus_display/` (folder name must match .ino for arduino-cli). Stack: Arduino (esp32 core 3.3.11), vendored Elecrow SSD1680 driver (`epd1680.{h,cpp}`) + Adafruit GFX (GFXcanvas1) + ArduinoJson (v7), gzip inflate via `tinfl_decompress_mem_to_mem` (in ESP32-S3 ROM, `#include "miniz.h"` — NOT `rom/miniz.h`, which doesn't exist on the S3 core).
+**WORKING — flashed and verified on hardware 2026-08-11.** Sketch lives in `bus_display/` (folder name must match .ino for arduino-cli). Stack: Arduino (esp32 core 3.3.11), **shared `crowpanel-epd` library** (drivers + `epdCanvasToPanel()` + preview harness; cloned at `~/Documents/Arduino/libraries/crowpanel-epd`, repo github.com/christianalmer/crowpanel-epd — edit there, push once, all display projects pick it up) + Adafruit GFX (GFXcanvas1) + ArduinoJson (v7), gzip inflate via `tinfl_decompress_mem_to_mem` (in ESP32-S3 ROM, `#include "miniz.h"` — NOT `rom/miniz.h`, which doesn't exist on the S3 core).
+
+**2026-08-17: hardware layer extracted to the crowpanel-epd library** (shared with bike-display). Library-based build compiles clean but is NOT yet flashed — board wasn't plugged in. Flash + verify next time it's connected (no behavior change expected; same code, new home).
 
 **GxEPD2 was tried and dropped** (still installed as a library, unused): `GxEPD2_213_BN` full refresh worked but partial refresh ghosted badly — that class uploads a custom LUT tuned for DEPG0213BN glass, which doesn't match this panel. `epd1680.cpp` follows Elecrow's own flow: partial refresh via the panel's factory OTP Mode-2 waveform (`0x22 = 0xFC`), previous frame maintained in RAM 0x26 after every refresh, deep-sleep mode 1 between updates (retains RAM, so the diff base survives).
 
@@ -70,7 +72,7 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
 - Pins, same on ALL board revisions: SCK 12, MOSI 11, RST 10, DC 13, CS 14, BUSY 9, panel power 7 (must be HIGH), power LED 19. Elecrow demos bit-bang these; we route them to hardware SPI via `SPI.begin(12, -1, 11, 14)`.
 - Two panel revisions exist with identical wiring: older = **SSD1680** (Elecrow repo `ESP32_S3-Ink-Screen`), newer = **JD79661**, UC8151-style, BUSY inverted (repo `CrowPanel-ESP32-2.13-E-paper-HMI-Display-with-122-250`, example/arduino-v1.2). GxEPD2 supports only the SSD1680 one.
 - **This unit is the older SSD1680 revision** (full refresh ~2.1s, BUSY active-high). Diagnostic: JD79661-protocol writes get zero BUSY response ("refresh done in 0 ms").
-- A vendored JD79661 driver (port of Elecrow's demo, plus a DU fast-refresh variant) is kept in `bus_display/extras/jd79661/` in case a future/replacement unit is the newer revision — swap it in and draw via GFXcanvas1 (see git-less history: it compiled and ran, just no panel response on this unit).
+- A vendored JD79661 driver (port of Elecrow's demo, plus a DU fast-refresh variant) lives in the crowpanel-epd library under `src/jd79661/` in case a future/replacement unit is the newer revision — swap the include and draw via GFXcanvas1 (it compiled and ran, just no panel response on this unit).
 - USB is a CH340K reporting idProduct **0x7522**, which macOS's built-in CH34x driver does NOT match (it only matches 0x7523/0x55D4) — needs WCH's CH34xVCPDriver from github.com/WCHSoftGroup/ch34xser_macos, approved in System Settings → General → Login Items & Extensions → Driver Extensions (no notification appears). Port shows as `/dev/cu.wchusbserial*`.
 
 Build/flash:
