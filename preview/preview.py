@@ -39,7 +39,7 @@ def draw_layout_v2(c: Canvas, minutes, minutes2, fetch_ok=True):
     if minutes2 >= 0:
         c.text("FreeSans9pt7b", LEFT, SUB_BASE, f"next: {minutes2} min", 1)
     else:
-        c.text("FreeSans9pt7b", LEFT, SUB_BASE, "<destination>", 1)
+        c.text("FreeSans9pt7b", LEFT, SUB_BASE, "Downtown", 1)
 
 
 if __name__ == "__main__":

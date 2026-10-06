@@ -9,3 +9,7 @@ bus_display/build/
 preview/*.png
 
 .DS_Store
+
+# Generated schedule data — departure times fingerprint the stop; keep private
+schedule.json
+bus_display/schedule.h

@@ -33,8 +33,17 @@ SECRETS = ROOT / "bus_display" / "secrets.h"
 OUT = ROOT / "bus_display" / "schedule.h"
 OUT_JSON = ROOT / "schedule.json"  # fetched by the device at runtime
 
-STOP_ID = "<stop-id>"
-ROUTE_ID = "00"
+# Stop/route come from env (CI) or gitignored secrets.h — not committed.
+def _secret(name, env):
+    if os.environ.get(env):
+        return os.environ[env]
+    m = re.search(rf'{name}\s+"([^"]+)"', SECRETS.read_text())
+    if not m:
+        sys.exit(f"set {env} env var or add {name} to bus_display/secrets.h")
+    return m.group(1)
+
+STOP_ID = _secret("SECRET_STOP_CODE", "STOP_ID")
+ROUTE_ID = _secret("SECRET_LINE_REF", "ROUTE_ID")
 
 
 def sketch_api_key():

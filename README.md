@@ -1,9 +1,7 @@
 # Muni bus departure display
 
-E-paper desk device showing minutes until the next
-[Muni Muni](https://www.sfmta.com/routes/) bus leaves
-<stop> (westbound, toward <destination>), so I know when to
-walk out the door.
+E-paper desk device showing minutes until the next Muni bus leaves a
+configurable stop, so I know when to walk out the door.
 
 ## Hardware
 
@@ -46,8 +44,9 @@ flashing. Keep `draw_layout_v2` in sync with the sketch.
 
 ## Adapting to another stop/route
 
-Change `STOP_CODE`/`LINE_REF` in the sketch and `STOP_ID`/`ROUTE_ID` in
-`tools/gen_schedule.py`, regenerate (`tools/update_schedule.sh`), and update
-`SCHEDULE_URL` to your own fork. Find stop ids on
+Set `SECRET_STOP_CODE`/`SECRET_LINE_REF`/`SECRET_DEST_LABEL` in
+`bus_display/secrets.h`, regenerate (`tools/update_schedule.sh`), and host the
+generated `schedule.json` wherever you like (`SECRET_SCHEDULE_URL`), or leave
+the URL empty to rely on the baked-in `schedule.h`. Find stop ids on
 [511.org](https://511.org/open-data) — beware paired stops: each direction has
 its own id.

@@ -11,8 +11,8 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
 ## Data source
 
 - 511.org SF Bay API, StopMonitoring endpoint (real-time Muni predictions)
-- `GET https://api.511.org/transit/StopMonitoring?api_key=KEY&agency=SF&stopcode=<stop-id>&format=json`
-- Stop: <stop>, **511 stop ID <stop-id>** = westbound, toward <destination> / SF Zoo
+- `GET https://api.511.org/transit/StopMonitoring?api_key=KEY&agency=SF&stopcode=STOPCODE&format=json`
+- Stop/route/destination label live in gitignored `bus_display/secrets.h` (SECRET_STOP_CODE etc.) — keep them out of committed files, the repo is public. Generated `schedule.h`/`schedule.json` are gitignored for the same reason (departure times fingerprint the stop)
   (14190 is the same intersection eastbound toward Bayview — do not use)
 - Route filter: LineRef "00"
 - Free token from 511.org/open-data/token; rate limit 60 requests/hour → poll once per minute
@@ -23,7 +23,7 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
     is in `ExpectedArrivalTime`; `AimedDepartureTime` is just the schedule.
     Fallback chain: ExpectedDeparture → ExpectedArrival → AimedDeparture
   - Late evening the feed often has only one predicted bus (bottom line then
-    falls back to "<destination>" — by design, not a bug)
+    falls back to the destination label — by design, not a bug)
   - **StopMonitoring only returns actively tracked vehicles** — untracked buses
     (shown as scheduled/"on time" in Google/Muni apps) are absent entirely.
     Fixed by merging a baked-in GTFS schedule (`bus_display/schedule.h`, generated
@@ -49,7 +49,7 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
 - Partial refresh only when the displayed minute changes; full refresh every 5 partials to clear ghosting
 - Partial refresh correctness depends on RAM 0x26 holding the on-glass frame: `epd1680.cpp` rewrites it after every refresh and sleeps in deep-sleep mode 1 (RAM retained). Don't switch to mode-2 sleep or cut panel power between updates
 - Departures that pass between polls are dropped locally so the countdown never goes negative
-- States: "N min" + "next: M min" / "NOW" under a minute / "No buses" overnight (bottom line falls back to "<destination>")
+- States: "N min" + "next: M min" / "NOW" under a minute / "No buses" overnight (bottom line falls back to the destination label)
 
 ## Display layout (landscape, 250x122)
 

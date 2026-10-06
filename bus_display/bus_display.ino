@@ -2,7 +2,7 @@
  * Muni Bus Departure Display
  * ------------------------------
  * Elecrow CrowPanel 2.13" e-paper (ESP32-S3) + 511.org StopMonitoring API
- * Stop: <stop>, toward <destination> (511 stop ID <stop-id>)
+ * Stop/route: configured in secrets.h (SECRET_STOP_CODE etc.)
  *
  * Behavior:
  *   - Polls 511 once per minute (free tier = 60 req/hr)
@@ -46,11 +46,11 @@ const char* API_KEY_511 = SECRET_API_KEY_511;
 
 // Published by GitHub Actions (tools/gen_schedule.py runs weekly in CI);
 // fetched daily so the baked-in schedule.h never goes stale.
-const char* SCHEDULE_URL =
-    "https://raw.githubusercontent.com/christianalmer/bus-display/main/schedule.json";
-const char* STOP_CODE   = "<stop-id>";            // <stop>, toward <destination>
-const char* AGENCY      = "SF";               // SF Muni
-const char* LINE_REF    = "00";
+const char* SCHEDULE_URL = SECRET_SCHEDULE_URL;  // "" = baked-in schedule only
+const char* STOP_CODE    = SECRET_STOP_CODE;
+const char* AGENCY       = "SF";               // SF Muni
+const char* LINE_REF     = SECRET_LINE_REF;
+const char* DEST_LABEL   = SECRET_DEST_LABEL;
 
 const uint32_t FETCH_INTERVAL_MS   = 65UL * 1000UL;  // rate limit is 60/hr; leave headroom
 const uint8_t  FULL_REFRESH_EVERY  = 5;              // partials between full refreshes (ghosting)
@@ -413,7 +413,7 @@ void render(int minutes, int minutes2, bool fullRefresh) {
     canvas.print(minutes2);
     canvas.print(" min");
   } else {
-    canvas.print("<destination>");
+    canvas.print(DEST_LABEL);
   }
 
   epdCanvasToPanel(canvas, epdBuf);
