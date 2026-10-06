@@ -15,18 +15,19 @@ from epd_preview import Canvas, write_png  # noqa: E402
 
 
 def draw_layout_v2(c: Canvas, minutes, minutes2, fetch_ok=True):
+    LINE = "5"  # sample route number for the mock (real one: secrets.h)
     """The layout in firmware render() — keep in sync with bus_display.ino.
 
     Centered on the widest state "NOW" (117px): badge 62 + gap 16 + 117 = 195
     -> badge x = 27, text column x = 105."""
     BX, BY, BW_, BH = 27, 30, 62, 62
-    BASE = 77          # shared baseline for badge "00" and the big number
+    BASE = 77          # shared baseline for the badge and the big number
     SUB_BASE = 112     # bottom info line baseline
     LEFT = 105         # left edge of the text column
 
     c.fill_round_rect(BX, BY, BW_, BH, 8, 1)
-    w23 = c.text_width("FreeSansBold24pt7b", "00")
-    c.text("FreeSansBold24pt7b", BX + (BW_ - w23) // 2, BASE, "00", 0)
+    wline = c.text_width("FreeSansBold24pt7b", LINE)
+    c.text("FreeSansBold24pt7b", BX + (BW_ - wline) // 2, BASE, LINE, 0)
 
     if minutes < 0:
         c.text("FreeSansBold12pt7b", LEFT, BASE, "No buses" if fetch_ok else "No data", 1)

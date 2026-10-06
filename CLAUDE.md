@@ -14,7 +14,7 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
 - `GET https://api.511.org/transit/StopMonitoring?api_key=KEY&agency=SF&stopcode=STOPCODE&format=json`
 - Stop/route/destination label live in gitignored `bus_display/secrets.h` (SECRET_STOP_CODE etc.) — keep them out of committed files, the repo is public. Generated `schedule.h`/`schedule.json` are gitignored for the same reason (departure times fingerprint the stop)
   (14190 is the same intersection eastbound toward Bayview — do not use)
-- Route filter: LineRef "00"
+- Route filter: LineRef = SECRET_LINE_REF from secrets.h
 - Free token from 511.org/open-data/token; rate limit 60 requests/hour → poll once per minute
 - **API quirks (all handled in firmware):**
   - Responses are always gzip-compressed, even without Accept-Encoding
@@ -53,11 +53,11 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
 
 ## Display layout (landscape, 250x122)
 
-- Left: black rounded square badge with "00" in white, static
+- Left: black rounded square badge with the route number (LINE_REF) in white, static
 - Center: large minutes number + small "min" label — the only region that changes per minute
 - Bottom right: second departure ("next: 22 min")
 - Fonts: Adafruit GFX FreeSansBold24pt / 12pt / FreeSans9pt
-- Composition horizontally centered on the widest state ("NOW", 117px): badge x=27 (its "00" at x=32; glyphs 52px wide), text column x=105. Shared baselines: badge "00" / big number / NOW / No buses at y=77; bottom line at y=112
+- Composition horizontally centered on the widest state ("NOW", 117px): badge x=27 (route number centered in it at runtime), text column x=105. Shared baselines: badge number / big number / NOW / No buses at y=77; bottom line at y=112
 - **Iterate on layout with `preview/preview.py`** — replicates render() pixel-for-pixel into PNGs (no flashing needed). The font/canvas/PNG harness lives in the crowpanel-epd library (`preview/epd_preview.py`); this project's file holds only `draw_layout_v2`, which must stay in sync with firmware render()
 
 ## Firmware status

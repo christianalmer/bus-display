@@ -369,25 +369,32 @@ void buildDepartures() {
 }
 
 // ======================= RENDER =======================
-// Landscape 250x122: "00" badge left, big minutes center, next bus below
+// Route badge at x=27: rounded square with LINE_REF centered in it
+// (width measured at runtime, so any 1-3 digit line number centers right).
+void drawRouteBadge() {
+  canvas.fillRoundRect(27, 30, 62, 62, 8, 1);
+  canvas.setFont(&FreeSansBold24pt7b);
+  canvas.setTextColor(0);
+  int16_t bx, by; uint16_t bw, bh;
+  canvas.getTextBounds(LINE_REF, 0, 77, &bx, &by, &bw, &bh);
+  canvas.setCursor(27 + (62 - (int16_t)bw) / 2 - bx, 77);
+  canvas.print(LINE_REF);
+  canvas.setTextColor(1);
+}
+
+// Landscape 250x122: route badge left, big minutes center, next bus below
 void render(int minutes, int minutes2, bool fullRefresh) {
   // Layout constants (keep in sync with preview/preview.py draw_layout_v2).
   // Centered on the widest state "NOW": badge 62 + gap 16 + 117 = 195 wide
   // -> badge x = 27, text column x = 105.
-  const int16_t BASE = 77;      // shared baseline: badge "00", number, NOW, No buses
+  const int16_t BASE = 77;      // shared baseline: badge, number, NOW, No buses
   const int16_t SUB_BASE = 112; // bottom info line baseline
   const int16_t LEFT = 105;     // left edge of the text column
 
   canvas.fillScreen(0);  // white
   canvas.setTextColor(1);
 
-  // Route badge; "00" is 52px wide in FreeSansBold24pt -> x = 27+(62-52)/2 = 32
-  canvas.fillRoundRect(27, 30, 62, 62, 8, 1);
-  canvas.setFont(&FreeSansBold24pt7b);
-  canvas.setTextColor(0);
-  canvas.setCursor(32, BASE);
-  canvas.print("00");
-  canvas.setTextColor(1);
+  drawRouteBadge();
 
   if (minutes < 0) {
     canvas.setFont(&FreeSansBold12pt7b);
@@ -441,12 +448,7 @@ void setup() {
   // Boot splash before any network: proves the panel works on its own
   Serial.println("Boot splash render...");
   canvas.fillScreen(0);
-  canvas.fillRoundRect(27, 30, 62, 62, 8, 1);
-  canvas.setFont(&FreeSansBold24pt7b);
-  canvas.setTextColor(0);
-  canvas.setCursor(32, 77);
-  canvas.print("00");
-  canvas.setTextColor(1);
+  drawRouteBadge();
   canvas.setFont(&FreeSans9pt7b);
   canvas.setCursor(105, 77);
   canvas.print("starting up...");
