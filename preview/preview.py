@@ -45,22 +45,28 @@ def draw_row(c: Canvas, top, line, dest, minutes, minutes2, fetch_ok=True):
     c.text("FreeSans9pt7b", RIGHT_EDGE - c.text_width("FreeSans9pt7b", info), BASE, info, 1)
 
 
-def draw_two_routes(c: Canvas, r1, r2, fetch_ok=True):
+def draw_two_routes(c: Canvas, r1, r2, fetch_ok=True, reminder=None):
     draw_row(c, 0, LINES[0], DESTS[0], *r1, fetch_ok)
-    c.fill_rect(8, 60, 234, 1, 1)  # divider
+    if reminder:
+        # Schedule-expiry notice in the free strip between the rows
+        # (classic 5x7 font at y=56, centered; replaces the divider line)
+        c.text_classic((250 - Canvas.text_classic_width(reminder)) // 2, 56,
+                       reminder, 1)
+    else:
+        c.fill_rect(8, 60, 234, 1, 1)  # divider
     draw_row(c, 61, LINES[1], DESTS[1], *r2, fetch_ok)
 
 
 if __name__ == "__main__":
     states = [
-        ((12, 22), (5, 25)),    # both live with next
-        ((7, -1), (0, 14)),     # one next-less, one NOW
-        ((-1, -1), (3, -1)),    # overnight vs single bus
+        ((12, 22), (5, 25), None),                             # normal
+        ((7, -1), (0, 14), "SCHEDULE ENDS JAN 15 - UPDATE ME"),  # expiry near
+        ((-1, -1), (3, -1), "SCHEDULE EXPIRED - RUN UPDATE"),    # expired
     ]
     variants = []
-    for r1, r2 in states:
+    for r1, r2, rem in states:
         c = Canvas()
-        draw_two_routes(c, r1, r2)
+        draw_two_routes(c, r1, r2, reminder=rem)
         variants.append(c)
     out = Path(__file__).parent / "preview_proposed.png"
     write_png(out, variants)

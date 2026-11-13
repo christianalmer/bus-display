@@ -67,6 +67,11 @@ E-paper desk device showing minutes until the next buses leave the stops near my
   on the same baseline
 - Row states: "N min" / "NOW" (18pt) / "No buses" / "No data" (12pt, right
   column suppressed)
+- **Schedule-expiry reminder**: starting 14 days before the baked table runs out
+  (`REMINDER_DAYS`), a classic-5x7-font line replaces the divider (top-left y=56,
+  centered): "SCHEDULE ENDS <MON> <D> - UPDATE ME", then "SCHEDULE EXPIRED - RUN
+  UPDATE" past the date. Disappears after `tools/update_schedule.sh` + reflash.
+  Classic-font preview support lives in the library harness (`text_classic`)
 - **Iterate on layout with `preview/preview.py`** — replicates render() pixel-for-pixel into PNGs (no flashing needed). The font/canvas/PNG harness lives in the crowpanel-epd library (`preview/epd_preview.py`); this project's file holds only `draw_layout_v2`, which must stay in sync with firmware render()
 
 ## Firmware status

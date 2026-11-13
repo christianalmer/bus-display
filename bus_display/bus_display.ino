@@ -236,6 +236,20 @@ time_t parseIso8601Utc(const char* s) {
   return (time_t)daysFromCivil(y, mo, d) * 86400 + h * 3600 + mi * 60 + sec;
 }
 
+// Inverse of daysFromCivil (Hinnant civil_from_days): day serial -> y/m/d
+void civilFromDays(long z, int* y, int* m, int* d) {
+  z += 719468L;
+  long era = (z >= 0 ? z : z - 146096L) / 146097L;
+  unsigned doe = (unsigned)(z - era * 146097L);
+  unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  long yy = (long)yoe + era * 400;
+  unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  unsigned mp = (5 * doy + 2) / 153;
+  *d = (int)(doy - (153 * mp + 2) / 5 + 1);
+  *m = (int)(mp < 10 ? mp + 3 : mp - 9);
+  *y = (int)(yy + (*m <= 2));
+}
+
 // ======================= 511 FETCH =======================
 bool fetchPredictions(uint8_t r) {
   const RouteCfg& cfg = ROUTES[r];
@@ -425,11 +439,52 @@ void drawRow(int16_t top, uint8_t r, int minutes, int minutes2) {
   canvas.print(info);
 }
 
+// Schedule-expiry reminder: shown in the strip between the rows starting
+// REMINDER_DAYS before the baked table runs out (the display is the only
+// place this project can nag — the remote-fetch URL is retired).
+#define REMINDER_DAYS 14
+bool scheduleReminder(char* out, size_t outLen) {
+  time_t now = time(nullptr);
+  struct tm lt;
+  localtime_r(&now, &lt);
+  long today = daysFromCivil(lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
+  long endDay = LONG_MAX;
+  for (int r = 0; r < NUM_ROUTES; r++) {
+    long e = sched[r].firstDay + sched[r].dayCount - 1;
+    if (e < endDay) endDay = e;
+  }
+  long daysLeft = endDay - today;
+  if (daysLeft < 0) {
+    snprintf(out, outLen, "SCHEDULE EXPIRED - RUN UPDATE");
+    return true;
+  }
+  if (daysLeft <= REMINDER_DAYS) {
+    static const char* MON[] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+    int y, m, d;
+    civilFromDays(endDay, &y, &m, &d);
+    snprintf(out, outLen, "SCHEDULE ENDS %s %d - UPDATE ME", MON[m - 1], d);
+    return true;
+  }
+  return false;
+}
+
 void render(int m1[NUM_ROUTES], int m2[NUM_ROUTES], bool fullRefresh) {
   canvas.fillScreen(0);
   canvas.setTextColor(1);
   drawRow(0, 0, m1[0], m2[0]);
-  canvas.fillRect(8, 60, 234, 1, 1);  // divider
+
+  char reminder[40];
+  if (scheduleReminder(reminder, sizeof(reminder))) {
+    // Classic 5x7 font (6px advance), top-left anchored, centered at y=52
+    canvas.setFont(nullptr);
+    canvas.setTextSize(1);
+    int16_t w = 6 * (int16_t)strlen(reminder) - 1;
+    canvas.setCursor((250 - w) / 2, 56);
+    canvas.print(reminder);
+  } else {
+    canvas.fillRect(8, 60, 234, 1, 1);  // divider
+  }
   drawRow(61, 1, m1[1], m2[1]);
 
   epdCanvasToPanel(canvas, epdBuf);
