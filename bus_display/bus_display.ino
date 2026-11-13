@@ -1,27 +1,27 @@
 /*
- * Muni Bus Departure Display
- * ------------------------------
+ * Muni Bus Departure Display (two routes)
+ * ---------------------------------------
  * Elecrow CrowPanel 2.13" e-paper (ESP32-S3) + 511.org StopMonitoring API
- * Stop/route: configured in secrets.h (SECRET_STOP_CODE etc.)
+ * Routes/stops: configured in secrets.h (SECRET_STOP_CODE / _2, etc.)
  *
  * Behavior:
- *   - Polls 511 once per minute (free tier = 60 req/hr)
- *   - Shows minutes until next departure, second departure smaller below
- *   - Fast DU refresh when the displayed minutes change
- *   - Full GC refresh every 15 fast refreshes to clear ghosting
- *   - "No buses" at night / when no predictions
+ *   - One display row per route: badge, countdown, "next"/destination
+ *   - Polls 511 alternately, one route per 65s tick (rate limit 60/hr
+ *     total, so two stops poll every ~130s each)
+ *   - Merges live predictions with the baked-in GTFS schedule per route
+ *     (511 omits untracked buses), matched by trip id
+ *   - Optional per-route DirectionRef filter: terminal stops (e.g. a loop
+ *     end) serve BOTH directions of one line; without the filter the row
+ *     would show buses arriving to die rather than departing
+ *   - Fast DU refresh when any row's minutes change; full GC refresh
+ *     every FULL_REFRESH_EVERY partials to clear ghosting
  *
- * Display stack: vendored Elecrow SSD1680 driver (epd1680.cpp) + Adafruit
- * GFX drawing into an off-screen 1-bit canvas. This unit is the older
- * CrowPanel revision (SSD1680 panel; the newer JD79661 revision's driver
- * is kept in extras/jd79661). GxEPD2 was tried and dropped: its
- * GxEPD2_213_BN partial-refresh LUT doesn't match this panel and ghosts
- * badly; Elecrow's flow uses the panel's own OTP Mode-2 waveform instead.
+ * Display stack: shared crowpanel-epd library (SSD1680 driver +
+ * epdCanvasToPanel) + Adafruit GFX canvas. See CLAUDE.md for the panel
+ * revision story (JD79661 variant driver lives in the library).
  *
  * Libraries (Library Manager): Adafruit GFX, ArduinoJson (v7)
- *
- * Board settings (per Elecrow tutorial): "ESP32S3 Dev Module",
- * PSRAM: OPI PSRAM, Partition scheme: Huge APP (3MB No OTA/1MB SPIFFS)
+ * Board: "ESP32S3 Dev Module", OPI PSRAM, Huge APP partition
  */
 
 #include <WiFi.h>
@@ -29,7 +29,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Adafruit_GFX.h>
-#include <Fonts/FreeSansBold24pt7b.h>
+#include <Fonts/FreeSansBold18pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include <time.h>
@@ -43,111 +43,126 @@
 const char* WIFI_SSID   = SECRET_WIFI_SSID;
 const char* WIFI_PASS   = SECRET_WIFI_PASS;
 const char* API_KEY_511 = SECRET_API_KEY_511;
-
-// Published by GitHub Actions (tools/gen_schedule.py runs weekly in CI);
-// fetched daily so the baked-in schedule.h never goes stale.
 const char* SCHEDULE_URL = SECRET_SCHEDULE_URL;  // "" = baked-in schedule only
-const char* STOP_CODE    = SECRET_STOP_CODE;
-const char* AGENCY       = "SF";               // SF Muni
-const char* LINE_REF     = SECRET_LINE_REF;
-const char* DEST_LABEL   = SECRET_DEST_LABEL;
+const char* AGENCY       = "SF";
 
-const uint32_t FETCH_INTERVAL_MS   = 65UL * 1000UL;  // rate limit is 60/hr; leave headroom
-const uint8_t  FULL_REFRESH_EVERY  = 5;              // partials between full refreshes (ghosting)
+#define NUM_ROUTES 2
+struct RouteCfg {
+  const char* stop;
+  const char* line;
+  const char* dirRef;  // 511 DirectionRef filter ("IB"/"OB"); "" = any
+  const char* dest;    // on-glass label when no second bus
+};
+const RouteCfg ROUTES[NUM_ROUTES] = {
+  { SECRET_STOP_CODE,   SECRET_LINE_REF,   SECRET_DIR_REF,   SECRET_DEST_LABEL },
+  { SECRET_STOP_CODE_2, SECRET_LINE_REF_2, SECRET_DIR_REF_2, SECRET_DEST_LABEL_2 },
+};
+
+const uint32_t FETCH_INTERVAL_MS   = 65UL * 1000UL;  // one request per tick (alternating)
+const uint8_t  FULL_REFRESH_EVERY  = 5;              // partials between full refreshes
 const char*    TZ_STRING = "PST8PDT,M3.2.0,M11.1.0/2";  // America/Los_Angeles
 
 // ======================= DISPLAY =======================
-// Draw in landscape 250x122 on a 1-bit canvas; epdCanvasToPanel() (library)
-// translates it to the panel's portrait RAM layout.
 GFXcanvas1 canvas(250, 122);
 uint8_t epdBuf[EPD_BUF_BYTES];
 
 // ======================= STATE =======================
 #define MAX_DEPARTURES 3
 #define MAX_PREDICTIONS 6
-time_t  departures[MAX_DEPARTURES];   // merged schedule+predictions, ascending
-uint8_t departureCount = 0;
-time_t   predTimes[MAX_PREDICTIONS];  // live predictions from 511
-uint32_t predTrips[MAX_PREDICTIONS];  // their trip ids (numeric prefix)
-uint8_t  predCount = 0;
-uint32_t predFreshMs = 0;             // millis() of last successful fetch
-int     lastShownMinutes = -999;
-uint8_t partialsSinceFull = 0;
+time_t   departures[NUM_ROUTES][MAX_DEPARTURES];  // merged, ascending
+uint8_t  departureCount[NUM_ROUTES] = {0};
+time_t   predTimes[NUM_ROUTES][MAX_PREDICTIONS];
+uint32_t predTrips[NUM_ROUTES][MAX_PREDICTIONS];
+uint8_t  predCount[NUM_ROUTES] = {0};
+uint32_t predFreshMs[NUM_ROUTES] = {0};
+bool     fetchOk[NUM_ROUTES] = {false, false};
+int      lastShown[NUM_ROUTES] = {-999, -999};
+uint8_t  fetchRouteIdx = 0;            // which route the next tick polls
+uint8_t  partialsSinceFull = 0;
 uint32_t lastFetchMs = 0;
-bool    fetchOk = false;
 
 // ======================= RUNTIME SCHEDULE =======================
-// RAM copy of the schedule, loaded from the NVS-cached download when
-// available, else from the baked-in schedule.h. Refreshed daily from
-// SCHEDULE_URL so it outlives the ~5-week GTFS validity window.
+// RAM copy per route, loaded from the NVS-cached download when available,
+// else from the baked-in schedule.h (SCHED_TABLES).
 #define RS_MAX_PATTERNS 8
 #define RS_MAX_ENTRIES  64
 #define RS_MAX_DAYS     70
 struct RtSched {
-  long     firstDay;                 // day serial of dayPattern[0]
+  long     firstDay;
   int16_t  dayCount;
-  int8_t   dayPattern[RS_MAX_DAYS];  // -1 = no service data
+  int8_t   dayPattern[RS_MAX_DAYS];
   uint8_t  patternCount;
   uint16_t patLen[RS_MAX_PATTERNS];
   uint16_t minutes[RS_MAX_PATTERNS][RS_MAX_ENTRIES];
   uint32_t trips[RS_MAX_PATTERNS][RS_MAX_ENTRIES];
 };
-RtSched sched;
+RtSched sched[NUM_ROUTES];
 Preferences prefs;
 uint32_t lastSchedFetchMs = 0;
-uint32_t schedRetryMs = 24UL * 60UL * 60UL * 1000UL;  // shortened to 1h on failure
+uint32_t schedRetryMs = 24UL * 60UL * 60UL * 1000UL;
 
 void loadBakedSchedule() {
-  sched.firstDay = SCHED_FIRST_DAY;
-  sched.dayCount = SCHED_DAY_COUNT < RS_MAX_DAYS ? SCHED_DAY_COUNT : RS_MAX_DAYS;
-  for (int16_t i = 0; i < sched.dayCount; i++) sched.dayPattern[i] = SCHED_DAY_PATTERN[i];
-  uint8_t pc = sizeof(SCHED_PATTERNS) / sizeof(SCHED_PATTERNS[0]);
-  sched.patternCount = pc < RS_MAX_PATTERNS ? pc : RS_MAX_PATTERNS;
-  for (uint8_t p = 0; p < sched.patternCount; p++) {
-    sched.patLen[p] = SCHED_PATTERN_LEN[p] < RS_MAX_ENTRIES ? SCHED_PATTERN_LEN[p] : RS_MAX_ENTRIES;
-    for (uint16_t i = 0; i < sched.patLen[p]; i++) {
-      sched.minutes[p][i] = SCHED_PATTERNS[p][i].minutes;
-      sched.trips[p][i] = SCHED_PATTERNS[p][i].trip;
+  for (int r = 0; r < NUM_ROUTES && r < SCHED_NUM_ROUTES; r++) {
+    const SchedTable& t = SCHED_TABLES[r];
+    RtSched& s = sched[r];
+    s.firstDay = t.firstDay;
+    s.dayCount = t.dayCount < RS_MAX_DAYS ? t.dayCount : RS_MAX_DAYS;
+    for (int16_t i = 0; i < s.dayCount; i++) s.dayPattern[i] = t.dayPattern[i];
+    s.patternCount = t.patternCount < RS_MAX_PATTERNS ? t.patternCount : RS_MAX_PATTERNS;
+    for (uint8_t p = 0; p < s.patternCount; p++) {
+      s.patLen[p] = t.patLen[p] < RS_MAX_ENTRIES ? t.patLen[p] : RS_MAX_ENTRIES;
+      for (uint16_t i = 0; i < s.patLen[p]; i++) {
+        s.minutes[p][i] = t.patterns[p][i].minutes;
+        s.trips[p][i] = t.patterns[p][i].trip;
+      }
     }
   }
-  Serial.println("schedule: using baked-in table");
+  Serial.println("schedule: using baked-in tables");
 }
 
+// v2 format: {"v":2,"routes":[{first_day,day_pattern,patterns:[{m,t}]},...]}
 bool parseScheduleJson(const char* text) {
   JsonDocument doc;
   if (deserializeJson(doc, text)) return false;
-  if (doc["v"].as<int>() != 1) return false;
-  JsonArray days = doc["day_pattern"].as<JsonArray>();
-  JsonArray pats = doc["patterns"].as<JsonArray>();
-  if (days.isNull() || pats.isNull() || pats.size() == 0 ||
-      pats.size() > RS_MAX_PATTERNS)
-    return false;
+  if (doc["v"].as<int>() != 2) return false;
+  JsonArray routes = doc["routes"].as<JsonArray>();
+  if (routes.isNull() || routes.size() < NUM_ROUTES) return false;
 
-  RtSched s;
-  s.firstDay = doc["first_day"].as<long>();
-  s.dayCount = 0;
-  for (JsonVariant v : days) {
-    if (s.dayCount >= RS_MAX_DAYS) break;
-    s.dayPattern[s.dayCount++] = v.as<int>();
-  }
-  s.patternCount = 0;
-  for (JsonObject p : pats) {
-    JsonArray m = p["m"].as<JsonArray>(), t = p["t"].as<JsonArray>();
-    if (m.isNull() || t.isNull() || m.size() != t.size() || m.size() > RS_MAX_ENTRIES)
+  static RtSched tmp[NUM_ROUTES];  // static: too big for the stack
+  for (int r = 0; r < NUM_ROUTES; r++) {
+    JsonObject ro = routes[r];
+    JsonArray days = ro["day_pattern"].as<JsonArray>();
+    JsonArray pats = ro["patterns"].as<JsonArray>();
+    if (days.isNull() || pats.isNull() || pats.size() == 0 ||
+        pats.size() > RS_MAX_PATTERNS)
       return false;
-    uint8_t pi = s.patternCount;
-    s.patLen[pi] = m.size();
-    for (uint16_t i = 0; i < s.patLen[pi]; i++) {
-      s.minutes[pi][i] = m[i].as<int>();
-      s.trips[pi][i] = t[i].as<uint32_t>();
+    RtSched& s = tmp[r];
+    s.firstDay = ro["first_day"].as<long>();
+    s.dayCount = 0;
+    for (JsonVariant v : days) {
+      if (s.dayCount >= RS_MAX_DAYS) break;
+      s.dayPattern[s.dayCount++] = v.as<int>();
     }
-    s.patternCount++;
+    s.patternCount = 0;
+    for (JsonObject p : pats) {
+      JsonArray m = p["m"].as<JsonArray>(), t = p["t"].as<JsonArray>();
+      if (m.isNull() || t.isNull() || m.size() != t.size() || m.size() > RS_MAX_ENTRIES)
+        return false;
+      uint8_t pi = s.patternCount;
+      s.patLen[pi] = m.size();
+      for (uint16_t i = 0; i < s.patLen[pi]; i++) {
+        s.minutes[pi][i] = m[i].as<int>();
+        s.trips[pi][i] = t[i].as<uint32_t>();
+      }
+      s.patternCount++;
+    }
   }
-  sched = s;
+  for (int r = 0; r < NUM_ROUTES; r++) sched[r] = tmp[r];
   return true;
 }
 
 bool fetchRemoteSchedule() {
+  if (!SCHEDULE_URL[0]) return false;
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
@@ -160,8 +175,7 @@ bool fetchRemoteSchedule() {
   prefs.begin("bus", false);
   prefs.putString("sched", body);
   prefs.end();
-  Serial.printf("schedule: remote updated (%u bytes, firstDay %ld, %d days)\n",
-                body.length(), sched.firstDay, sched.dayCount);
+  Serial.printf("schedule: remote updated (%u bytes)\n", body.length());
   return true;
 }
 
@@ -171,40 +185,32 @@ void initSchedule() {
   String cached = prefs.getString("sched", "");
   prefs.end();
   if (cached.length() && parseScheduleJson(cached.c_str()))
-    Serial.printf("schedule: using cached download (firstDay %ld, %d days)\n",
-                  sched.firstDay, sched.dayCount);
+    Serial.println("schedule: using cached download");
 }
 
 // ======================= GZIP =======================
 // 511 always gzips JSON responses, even without Accept-Encoding.
-// We inflate with miniz's tinfl, which lives in the ESP32-S3 ROM
-// (esp_rom/include/miniz.h; verified in esp32s3.rom.ld for core 3.3.11).
+// tinfl lives in the ESP32-S3 ROM (verified in esp32s3.rom.ld).
 #include "miniz.h"
 
-// Returns malloc'd buffer with inflated data (caller frees), or nullptr.
 uint8_t* gunzip(const uint8_t* in, size_t inLen, size_t* outLen) {
   if (inLen < 18 || in[0] != 0x1f || in[1] != 0x8b) return nullptr;
-  // Skip 10-byte header + optional fields
   size_t p = 10;
   uint8_t flg = in[3];
-  if (flg & 0x04) { // FEXTRA
+  if (flg & 0x04) {
     if (p + 2 > inLen) return nullptr;
     uint16_t xlen = in[p] | (in[p + 1] << 8);
     p += 2 + xlen;
   }
-  if (flg & 0x08) { while (p < inLen && in[p++] != 0); } // FNAME
-  if (flg & 0x10) { while (p < inLen && in[p++] != 0); } // FCOMMENT
-  if (flg & 0x02) { p += 2; }                            // FHCRC
+  if (flg & 0x08) { while (p < inLen && in[p++] != 0); }
+  if (flg & 0x10) { while (p < inLen && in[p++] != 0); }
+  if (flg & 0x02) { p += 2; }
   if (p >= inLen - 8) return nullptr;
-
-  // ISIZE (uncompressed length) = last 4 bytes, little-endian
   size_t isize = in[inLen - 4] | (in[inLen - 3] << 8) |
                  (in[inLen - 2] << 16) | ((size_t)in[inLen - 1] << 24);
   if (isize == 0 || isize > 512 * 1024) return nullptr;
-
   uint8_t* out = (uint8_t*)malloc(isize + 1);
   if (!out) return nullptr;
-
   size_t got = tinfl_decompress_mem_to_mem(
       out, isize, in + p, inLen - p - 8, 0 /* raw deflate */);
   if (got == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED) { free(out); return nullptr; }
@@ -214,8 +220,7 @@ uint8_t* gunzip(const uint8_t* in, size_t inLen, size_t* outLen) {
 }
 
 // ======================= TIME HELPERS =======================
-// Days-from-civil algorithm (Howard Hinnant), avoids timezone headaches.
-// Also the day-serial convention used by schedule.h (SCHED_FIRST_DAY).
+// Days-from-civil (Howard Hinnant); also schedule.h's day-serial convention.
 long daysFromCivil(int y, int mo, int d) {
   int yy = y - (mo <= 2);
   int era = (yy >= 0 ? yy : yy - 399) / 400;
@@ -225,7 +230,6 @@ long daysFromCivil(int y, int mo, int d) {
   return era * 146097L + (long)doe - 719468L;
 }
 
-// Parse "2026-08-11T22:31:00Z" (UTC) -> epoch seconds.
 time_t parseIso8601Utc(const char* s) {
   int y, mo, d, h, mi, sec;
   if (sscanf(s, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &sec) != 6) return 0;
@@ -233,20 +237,19 @@ time_t parseIso8601Utc(const char* s) {
 }
 
 // ======================= 511 FETCH =======================
-bool fetchPredictions() {
+bool fetchPredictions(uint8_t r) {
+  const RouteCfg& cfg = ROUTES[r];
   WiFiClientSecure client;
-  client.setInsecure();  // fine for public transit data; pin a cert later if you like
+  client.setInsecure();  // public transit data
 
   String url = String("https://api.511.org/transit/StopMonitoring?api_key=") +
-               API_KEY_511 + "&agency=" + AGENCY + "&stopcode=" + STOP_CODE +
+               API_KEY_511 + "&agency=" + AGENCY + "&stopcode=" + cfg.stop +
                "&format=json";
 
   HTTPClient http;
   if (!http.begin(client, url)) return false;
   int code = http.GET();
   if (code != 200) { http.end(); return false; }
-
-  // Read the (gzipped) body fully into RAM — typically only a few KB
   String body = http.getString();
   http.end();
 
@@ -256,19 +259,19 @@ bool fetchPredictions() {
   if (json) {
     text = (const char*)json;
   } else if (body.length() && body[0] == '{') {
-    text = body.c_str();  // in case it ever arrives uncompressed
+    text = body.c_str();
     jsonLen = body.length();
   } else {
     return false;
   }
-
   // 511 responses start with a UTF-8 BOM — skip it or ArduinoJson chokes
   if (jsonLen >= 3 && (uint8_t)text[0] == 0xEF) text += 3;
 
-  // Filter to keep parsing memory small
   JsonDocument filter;
   filter["ServiceDelivery"]["StopMonitoringDelivery"]["MonitoredStopVisit"][0]
         ["MonitoredVehicleJourney"]["LineRef"] = true;
+  filter["ServiceDelivery"]["StopMonitoringDelivery"]["MonitoredStopVisit"][0]
+        ["MonitoredVehicleJourney"]["DirectionRef"] = true;
   filter["ServiceDelivery"]["StopMonitoringDelivery"]["MonitoredStopVisit"][0]
         ["MonitoredVehicleJourney"]["FramedVehicleJourneyRef"]["DatedVehicleJourneyRef"] = true;
   filter["ServiceDelivery"]["StopMonitoringDelivery"]["MonitoredStopVisit"][0]
@@ -284,14 +287,20 @@ bool fetchPredictions() {
   if (json) free(json);
   if (err) return false;
 
-  predCount = 0;
+  predCount[r] = 0;
   time_t now = time(nullptr);
   JsonArray visits = doc["ServiceDelivery"]["StopMonitoringDelivery"]
                         ["MonitoredStopVisit"].as<JsonArray>();
   for (JsonObject v : visits) {
     JsonObject mvj = v["MonitoredVehicleJourney"];
     const char* line = mvj["LineRef"];
-    if (line && strcmp(line, LINE_REF) != 0) continue;
+    if (line && strcmp(line, cfg.line) != 0) continue;
+    // Direction filter: at a terminal stop both directions of the line
+    // stop here; only the configured one is boardable.
+    if (cfg.dirRef[0]) {
+      const char* dir = mvj["DirectionRef"];
+      if (!dir || strcmp(dir, cfg.dirRef) != 0) continue;
+    }
     // Muni often only fills ExpectedArrivalTime at mid-route stops; that's
     // the real-time prediction. AimedDepartureTime is just the schedule.
     const char* t = mvj["MonitoredCall"]["ExpectedDepartureTime"];
@@ -300,128 +309,128 @@ bool fetchPredictions() {
     if (!t) continue;
     time_t dep = parseIso8601Utc(t);
     if (dep <= now) continue;
-    // "12065578_M11" -> 12065578; used to match against schedule.h trips
     const char* ref = mvj["FramedVehicleJourneyRef"]["DatedVehicleJourneyRef"];
     uint32_t trip = ref ? strtoul(ref, nullptr, 10) : 0;
-    if (predCount < MAX_PREDICTIONS) {
-      predTimes[predCount] = dep;
-      predTrips[predCount] = trip;
-      predCount++;
+    if (predCount[r] < MAX_PREDICTIONS) {
+      predTimes[r][predCount[r]] = dep;
+      predTrips[r][predCount[r]] = trip;
+      predCount[r]++;
     }
   }
-  predFreshMs = millis();
+  predFreshMs[r] = millis();
   return true;
 }
 
 // ======================= SCHEDULE MERGE =======================
-// 511 StopMonitoring only lists actively tracked buses; untracked trips are
-// simply absent (apps show them as scheduled/"on time"). Merge the baked-in
-// GTFS schedule with live predictions, matching trips by id so a tracked
-// bus never appears twice. Predictions win for their trip.
-void buildDepartures() {
+// Merge baked GTFS schedule with live predictions per route; predictions
+// win for their trip id (511 omits untracked buses entirely).
+void buildDepartures(uint8_t r) {
   time_t now = time(nullptr);
-  bool predsFresh = predCount > 0 && (millis() - predFreshMs) < 5UL * 60UL * 1000UL;
+  // Preds stale after 6 min (each route is polled every ~130s)
+  bool predsFresh = predCount[r] > 0 &&
+                    (millis() - predFreshMs[r]) < 6UL * 60UL * 1000UL;
 
   time_t cand[MAX_PREDICTIONS + MAX_DEPARTURES + 2];
   uint8_t n = 0;
 
   if (predsFresh) {
-    for (uint8_t i = 0; i < predCount; i++)
-      if (predTimes[i] > now && n < (uint8_t)(sizeof(cand) / sizeof(cand[0])))
-        cand[n++] = predTimes[i];
+    for (uint8_t i = 0; i < predCount[r]; i++)
+      if (predTimes[r][i] > now && n < (uint8_t)(sizeof(cand) / sizeof(cand[0])))
+        cand[n++] = predTimes[r][i];
   }
 
   struct tm lt;
   localtime_r(&now, &lt);
-  long dayIdx = daysFromCivil(lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday) - sched.firstDay;
-  if (dayIdx >= 0 && dayIdx < sched.dayCount && sched.dayPattern[dayIdx] >= 0 &&
-      sched.dayPattern[dayIdx] < sched.patternCount) {
-    int8_t p = sched.dayPattern[dayIdx];
+  RtSched& s = sched[r];
+  long dayIdx = daysFromCivil(lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday) - s.firstDay;
+  if (dayIdx >= 0 && dayIdx < s.dayCount && s.dayPattern[dayIdx] >= 0 &&
+      s.dayPattern[dayIdx] < s.patternCount) {
+    int8_t p = s.dayPattern[dayIdx];
     struct tm mid = lt;
     mid.tm_hour = 0; mid.tm_min = 0; mid.tm_sec = 0; mid.tm_isdst = -1;
     time_t midnight = mktime(&mid);
     uint8_t added = 0;
-    for (uint16_t i = 0; i < sched.patLen[p] && added < MAX_DEPARTURES + 2; i++) {
-      time_t dep = midnight + (time_t)sched.minutes[p][i] * 60;
+    for (uint16_t i = 0; i < s.patLen[p] && added < MAX_DEPARTURES + 2; i++) {
+      time_t dep = midnight + (time_t)s.minutes[p][i] * 60;
       if (dep <= now) continue;
       bool tracked = false;
       if (predsFresh) {
-        for (uint8_t j = 0; j < predCount; j++)
-          if (predTrips[j] != 0 && predTrips[j] == sched.trips[p][i]) { tracked = true; break; }
+        for (uint8_t j = 0; j < predCount[r]; j++)
+          if (predTrips[r][j] != 0 && predTrips[r][j] == s.trips[p][i]) { tracked = true; break; }
       }
-      if (tracked) continue;  // live prediction covers this trip
+      if (tracked) continue;
       if (n < (uint8_t)(sizeof(cand) / sizeof(cand[0]))) { cand[n++] = dep; added++; }
     }
   } else {
-    static bool warned = false;
-    if (!warned) { Serial.println("schedule out of date range - predictions only"); warned = true; }
+    static bool warned[NUM_ROUTES] = {false};
+    if (!warned[r]) {
+      Serial.printf("schedule (route %s) out of date range - predictions only\n", ROUTES[r].line);
+      warned[r] = true;
+    }
   }
 
-  // insertion sort (n is tiny), then keep the first MAX_DEPARTURES
   for (uint8_t i = 1; i < n; i++) {
     time_t v = cand[i];
     int8_t j = i - 1;
     while (j >= 0 && cand[j] > v) { cand[j + 1] = cand[j]; j--; }
     cand[j + 1] = v;
   }
-  departureCount = n < MAX_DEPARTURES ? n : MAX_DEPARTURES;
-  for (uint8_t i = 0; i < departureCount; i++) departures[i] = cand[i];
+  departureCount[r] = n < MAX_DEPARTURES ? n : MAX_DEPARTURES;
+  for (uint8_t i = 0; i < departureCount[r]; i++) departures[r][i] = cand[i];
 }
 
 // ======================= RENDER =======================
-// Route badge at x=27: rounded square with LINE_REF centered in it
-// (width measured at runtime, so any 1-3 digit line number centers right).
-void drawRouteBadge() {
-  canvas.fillRoundRect(27, 30, 62, 62, 8, 1);
-  canvas.setFont(&FreeSansBold24pt7b);
-  canvas.setTextColor(0);
+// Two rows of 61px; keep in sync with preview/preview.py draw_row():
+// badge 44x44 at x=8, text column x=64, info right-aligned to x=242,
+// row baseline top+44, divider at y=60.
+void drawRow(int16_t top, uint8_t r, int minutes, int minutes2) {
+  const int16_t BASE = top + 44;
+  const int16_t LEFT = 64;
+  const int16_t RIGHT_EDGE = 242;
   int16_t bx, by; uint16_t bw, bh;
-  canvas.getTextBounds(LINE_REF, 0, 77, &bx, &by, &bw, &bh);
-  canvas.setCursor(27 + (62 - (int16_t)bw) / 2 - bx, 77);
-  canvas.print(LINE_REF);
+
+  // Badge with route number centered
+  canvas.fillRoundRect(8, top + 8, 44, 44, 6, 1);
+  canvas.setFont(&FreeSansBold12pt7b);
+  canvas.setTextColor(0);
+  canvas.getTextBounds(ROUTES[r].line, 0, 0, &bx, &by, &bw, &bh);
+  canvas.setCursor(8 + (44 - (int16_t)bw) / 2 - bx, top + 8 + 30);
+  canvas.print(ROUTES[r].line);
   canvas.setTextColor(1);
-}
-
-// Landscape 250x122: route badge left, big minutes center, next bus below
-void render(int minutes, int minutes2, bool fullRefresh) {
-  // Layout constants (keep in sync with preview/preview.py draw_layout_v2).
-  // Centered on the widest state "NOW": badge 62 + gap 16 + 117 = 195 wide
-  // -> badge x = 27, text column x = 105.
-  const int16_t BASE = 77;      // shared baseline: badge, number, NOW, No buses
-  const int16_t SUB_BASE = 112; // bottom info line baseline
-  const int16_t LEFT = 105;     // left edge of the text column
-
-  canvas.fillScreen(0);  // white
-  canvas.setTextColor(1);
-
-  drawRouteBadge();
 
   if (minutes < 0) {
     canvas.setFont(&FreeSansBold12pt7b);
     canvas.setCursor(LEFT, BASE);
-    canvas.print(fetchOk ? "No buses" : "No data");
+    canvas.print(fetchOk[r] ? "No buses" : "No data");
+    return;  // no right column on an empty row
   } else if (minutes == 0) {
-    canvas.setFont(&FreeSansBold24pt7b);
+    canvas.setFont(&FreeSansBold18pt7b);
     canvas.setCursor(LEFT, BASE);
     canvas.print("NOW");
   } else {
-    canvas.setFont(&FreeSansBold24pt7b);
+    canvas.setFont(&FreeSansBold18pt7b);
     canvas.setCursor(LEFT, BASE);
     canvas.print(minutes);
     canvas.setFont(&FreeSansBold12pt7b);
-    canvas.setCursor(canvas.getCursorX() + 6, BASE);
+    canvas.setCursor(canvas.getCursorX() + 5, BASE);
     canvas.print("min");
   }
 
+  char info[24];
+  if (minutes2 >= 0) snprintf(info, sizeof(info), "next %d", minutes2);
+  else snprintf(info, sizeof(info), "%s", ROUTES[r].dest);
   canvas.setFont(&FreeSans9pt7b);
-  canvas.setCursor(LEFT, SUB_BASE);
-  if (minutes2 >= 0) {
-    canvas.print("next: ");
-    canvas.print(minutes2);
-    canvas.print(" min");
-  } else {
-    canvas.print(DEST_LABEL);
-  }
+  canvas.getTextBounds(info, 0, 0, &bx, &by, &bw, &bh);
+  canvas.setCursor(RIGHT_EDGE - (int16_t)bw - bx, BASE);
+  canvas.print(info);
+}
+
+void render(int m1[NUM_ROUTES], int m2[NUM_ROUTES], bool fullRefresh) {
+  canvas.fillScreen(0);
+  canvas.setTextColor(1);
+  drawRow(0, 0, m1[0], m2[0]);
+  canvas.fillRect(8, 60, 234, 1, 1);  // divider
+  drawRow(61, 1, m1[1], m2[1]);
 
   epdCanvasToPanel(canvas, epdBuf);
   uint32_t t0 = millis();
@@ -439,6 +448,23 @@ void render(int minutes, int minutes2, bool fullRefresh) {
 }
 
 // ======================= SETUP / LOOP =======================
+void updateDisplay(bool forceFull) {
+  time_t now = time(nullptr);
+  int m1[NUM_ROUTES], m2[NUM_ROUTES];
+  bool changed = false;
+  for (uint8_t r = 0; r < NUM_ROUTES; r++) {
+    buildDepartures(r);  // also drops passed departures
+    m1[r] = departureCount[r] > 0 ? (int)((departures[r][0] - now) / 60) : -1;
+    m2[r] = departureCount[r] > 1 ? (int)((departures[r][1] - now) / 60) : -1;
+    if (m1[r] != lastShown[r]) changed = true;
+  }
+  if (forceFull || changed) {
+    bool full = forceFull || partialsSinceFull >= FULL_REFRESH_EVERY;
+    render(m1, m2, full);
+    for (uint8_t r = 0; r < NUM_ROUTES; r++) lastShown[r] = m1[r];
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -448,9 +474,9 @@ void setup() {
   // Boot splash before any network: proves the panel works on its own
   Serial.println("Boot splash render...");
   canvas.fillScreen(0);
-  drawRouteBadge();
+  canvas.setTextColor(1);
   canvas.setFont(&FreeSans9pt7b);
-  canvas.setCursor(105, 77);
+  canvas.setCursor(64, 44);
   canvas.print("starting up...");
   epdCanvasToPanel(canvas, epdBuf);
   EPD1680_Init();
@@ -465,50 +491,44 @@ void setup() {
 
   configTzTime(TZ_STRING, "pool.ntp.org", "time.google.com");
   Serial.println("Waiting for NTP...");
-  while (time(nullptr) < 1600000000) delay(200);  // wait for NTP
+  while (time(nullptr) < 1600000000) delay(200);
   Serial.println("NTP synced");
 
   initSchedule();
-  if (fetchRemoteSchedule()) schedRetryMs = 24UL * 60UL * 60UL * 1000UL;
-  else schedRetryMs = 60UL * 60UL * 1000UL;
-  lastSchedFetchMs = millis();
+  if (SCHEDULE_URL[0]) {
+    schedRetryMs = fetchRemoteSchedule() ? 24UL * 60UL * 60UL * 1000UL
+                                         : 60UL * 60UL * 1000UL;
+    lastSchedFetchMs = millis();
+  }
 
-  fetchOk = fetchPredictions();
-  Serial.printf("Fetch %s, %u live predictions\n", fetchOk ? "OK" : "FAILED", predCount);
+  // Initial fetch for both routes (then the loop alternates)
+  time_t now;
+  for (uint8_t r = 0; r < NUM_ROUTES; r++) {
+    fetchOk[r] = fetchPredictions(r);
+    Serial.printf("Route %s: fetch %s, %u live predictions\n",
+                  ROUTES[r].line, fetchOk[r] ? "OK" : "FAILED", predCount[r]);
+  }
   lastFetchMs = millis();
   updateDisplay(true);
-  Serial.printf("Merged: %u departures", departureCount);
-  time_t now = time(nullptr);
-  for (uint8_t i = 0; i < departureCount; i++)
-    Serial.printf("  +%ldmin", (long)((departures[i] - now) / 60));
-  Serial.println();
-}
-
-void updateDisplay(bool forceFull) {
-  time_t now = time(nullptr);
-
-  // Rebuild from schedule + fresh predictions; also drops passed departures
-  buildDepartures();
-
-  int m1 = departureCount > 0 ? (int)((departures[0] - now) / 60) : -1;
-  int m2 = departureCount > 1 ? (int)((departures[1] - now) / 60) : -1;
-
-  if (forceFull || m1 != lastShownMinutes) {
-    bool full = forceFull || partialsSinceFull >= FULL_REFRESH_EVERY;
-    render(m1, m2, full);
-    lastShownMinutes = m1;
+  now = time(nullptr);
+  for (uint8_t r = 0; r < NUM_ROUTES; r++) {
+    Serial.printf("Route %s merged: %u departures", ROUTES[r].line, departureCount[r]);
+    for (uint8_t i = 0; i < departureCount[r]; i++)
+      Serial.printf("  +%ldmin", (long)((departures[r][i] - now) / 60));
+    Serial.println();
   }
 }
 
 void loop() {
   if (millis() - lastFetchMs >= FETCH_INTERVAL_MS) {
     if (WiFi.status() != WL_CONNECTED) WiFi.reconnect();
-    fetchOk = fetchPredictions();
+    fetchOk[fetchRouteIdx] = fetchPredictions(fetchRouteIdx);
+    fetchRouteIdx = (fetchRouteIdx + 1) % NUM_ROUTES;
     lastFetchMs = millis();
   }
-  if (millis() - lastSchedFetchMs >= schedRetryMs) {
+  if (SCHEDULE_URL[0] && millis() - lastSchedFetchMs >= schedRetryMs) {
     schedRetryMs = fetchRemoteSchedule() ? 24UL * 60UL * 60UL * 1000UL
-                                         : 60UL * 60UL * 1000UL;  // retry hourly on failure
+                                         : 60UL * 60UL * 1000UL;
     lastSchedFetchMs = millis();
   }
   updateDisplay(false);

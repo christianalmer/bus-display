@@ -1,6 +1,6 @@
 # Muni bus departure display
 
-E-paper desk device showing minutes until the next 23 bus leaves the stop near my house, so I know when to walk out the door.
+E-paper desk device showing minutes until the next buses leave the stops near my house, so I know when to walk out the door. **Two routes since 2026-11-13**, one display row each; both configured in gitignored `secrets.h` (route 2 = `SECRET_*_2`).
 
 ## Hardware
 
@@ -15,7 +15,13 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
 - Stop/route/destination label live in gitignored `bus_display/secrets.h` (SECRET_STOP_CODE etc.) — keep them out of committed files, the repo is public. Generated `schedule.h`/`schedule.json` are gitignored for the same reason (departure times fingerprint the stop)
   (14190 is the same intersection eastbound toward Bayview — do not use)
 - Route filter: LineRef = SECRET_LINE_REF from secrets.h
-- Free token from 511.org/open-data/token; rate limit 60 requests/hour → poll once per minute
+- **Direction filter (SECRET_DIR_REF, 511 `DirectionRef`)**: terminal/loop stops serve
+  BOTH directions of a line — arriving buses that end there appear in the feed too.
+  Without the filter the row shows buses you can't board. SECRET_GTFS_DIR is the
+  matching GTFS `direction_id` for gen_schedule.py (pick by `trip_headsign` in
+  trips.txt). Empty string = no filtering (single-direction stops)
+- Free token from 511.org/open-data/token; rate limit 60 requests/hour → the loop
+  polls ONE route per 65s tick, alternating, so each route updates every ~130s
 - **API quirks (all handled in firmware):**
   - Responses are always gzip-compressed, even without Accept-Encoding
   - JSON body starts with a UTF-8 BOM (3 bytes) that breaks ArduinoJson unless skipped
@@ -44,20 +50,23 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
 
 ## Behavior
 
-- Poll 511 every 65s (60s = exactly the rate limit, no headroom for manual testing); NTP-synced clock (TZ: America/Los_Angeles)
+- One 511 request per 65s tick, alternating between the two routes; NTP-synced clock (TZ: America/Los_Angeles). Predictions considered stale after 6 min (route poll period is ~130s)
 - Display shows whole minutes, not seconds (e-paper can't sustain 1 Hz refreshes)
-- Partial refresh only when the displayed minute changes; full refresh every 5 partials to clear ghosting
+- Partial refresh when ANY row's displayed minute changes; full refresh every 5 partials to clear ghosting
 - Partial refresh correctness depends on RAM 0x26 holding the on-glass frame: `epd1680.cpp` rewrites it after every refresh and sleeps in deep-sleep mode 1 (RAM retained). Don't switch to mode-2 sleep or cut panel power between updates
 - Departures that pass between polls are dropped locally so the countdown never goes negative
 - States: "N min" + "next: M min" / "NOW" under a minute / "No buses" overnight (bottom line falls back to the destination label)
 
-## Display layout (landscape, 250x122)
+## Display layout (landscape, 250x122, two rows)
 
-- Left: black rounded square badge with the route number (LINE_REF) in white, static
-- Center: large minutes number + small "min" label — the only region that changes per minute
-- Bottom right: second departure ("next: 22 min")
-- Fonts: Adafruit GFX FreeSansBold24pt / 12pt / FreeSans9pt
-- Composition horizontally centered on the widest state ("NOW", 117px): badge x=27 (route number centered in it at runtime), text column x=105. Shared baselines: badge number / big number / NOW / No buses at y=77; bottom line at y=112
+- One 61px row per route, divider line at y=60 (x 8..242)
+- Per row (top = 0 or 61): badge 44x44 at x=8 y=top+8 (route number
+  FreeSansBold12pt centered at runtime, baseline top+38), countdown
+  FreeSansBold18pt + "min" 12pt at x=64 baseline top+44, info column
+  (FreeSans9pt, "next M" or the destination label) right-aligned to x=242
+  on the same baseline
+- Row states: "N min" / "NOW" (18pt) / "No buses" / "No data" (12pt, right
+  column suppressed)
 - **Iterate on layout with `preview/preview.py`** — replicates render() pixel-for-pixel into PNGs (no flashing needed). The font/canvas/PNG harness lives in the crowpanel-epd library (`preview/epd_preview.py`); this project's file holds only `draw_layout_v2`, which must stay in sync with firmware render()
 
 ## Firmware status
@@ -65,6 +74,8 @@ E-paper desk device showing minutes until the next 23 bus leaves the stop near m
 **WORKING — flashed and verified on hardware 2026-08-11.** Sketch lives in `bus_display/` (folder name must match .ino for arduino-cli). Stack: Arduino (esp32 core 3.3.11), **shared `crowpanel-epd` library** (drivers + `epdCanvasToPanel()` + preview harness; cloned at `~/Documents/Arduino/libraries/crowpanel-epd`, repo github.com/christianalmer/crowpanel-epd — edit there, push once, all display projects pick it up) + Adafruit GFX (GFXcanvas1) + ArduinoJson (v7), gzip inflate via `tinfl_decompress_mem_to_mem` (in ESP32-S3 ROM, `#include "miniz.h"` — NOT `rom/miniz.h`, which doesn't exist on the S3 core).
 
 **2026-08-17: hardware layer extracted to the crowpanel-epd library** (shared with bike-display). Library-based build flashed and verified on hardware same day.
+
+**2026-11-13: two-route rework, flashed + verified on a NEW panel unit** (also the SSD1680 revision — clean BUSY handshake, full refresh ~2.4s). One row per route; per-route prediction/schedule state; alternating fetch; DirectionRef filter (route 2's stop is a terminal loop serving both directions — IB = departing). `gen_schedule.py` now emits `SCHED_TABLES[]` for all routes (+ v2 schedule.json) and trims the day table to start yesterday (GTFS validity can exceed the RS_MAX_DAYS=70 cap). **Baked schedule valid through 2027-01-15** — regenerate with `tools/update_schedule.sh` around then (remote-fetch URL is retired; SECRET_SCHEDULE_URL empty, machinery still in place and now expects v2 JSON).
 
 **GxEPD2 was tried and dropped** (still installed as a library, unused): `GxEPD2_213_BN` full refresh worked but partial refresh ghosted badly — that class uploads a custom LUT tuned for DEPG0213BN glass, which doesn't match this panel. `epd1680.cpp` follows Elecrow's own flow: partial refresh via the panel's factory OTP Mode-2 waveform (`0x22 = 0xFC`), previous frame maintained in RAM 0x26 after every refresh, deep-sleep mode 1 between updates (retains RAM, so the diff base survives).
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Pixel-accurate preview of the bus display layout.
+"""Pixel-accurate preview of the bus display layout (two routes).
 
 Rendering harness (font parsing, canvas, PNG) lives in the crowpanel-epd
-library; this file holds only the project's layouts. Edit draw_layout_v2,
+library; this file holds only the project's layouts. Edit draw_two_routes,
 run, look at preview_proposed.png, and mirror final coordinates back into
 render() in bus_display.ino.
 """
@@ -13,41 +13,54 @@ from pathlib import Path
 sys.path.insert(0, str(Path.home() / "Documents/Arduino/libraries/crowpanel-epd/preview"))
 from epd_preview import Canvas, write_png  # noqa: E402
 
+# Sample route numbers for the mock (real ones live in secrets.h)
+LINES = ("5", "67")
+DESTS = ("Downtown", "Mission")
 
-def draw_layout_v2(c: Canvas, minutes, minutes2, fetch_ok=True):
-    LINE = "5"  # sample route number for the mock (real one: secrets.h)
-    """The layout in firmware render() — keep in sync with bus_display.ino.
 
-    Centered on the widest state "NOW" (117px): badge 62 + gap 16 + 117 = 195
-    -> badge x = 27, text column x = 105."""
-    BX, BY, BW_, BH = 27, 30, 62, 62
-    BASE = 77          # shared baseline for the badge and the big number
-    SUB_BASE = 112     # bottom info line baseline
-    LEFT = 105         # left edge of the text column
+def draw_row(c: Canvas, top, line, dest, minutes, minutes2, fetch_ok=True):
+    """One route row, 61px tall. Keep in sync with drawRow() in firmware.
 
-    c.fill_round_rect(BX, BY, BW_, BH, 8, 1)
-    wline = c.text_width("FreeSansBold24pt7b", LINE)
-    c.text("FreeSansBold24pt7b", BX + (BW_ - wline) // 2, BASE, LINE, 0)
+    badge 44x44 at x=8; text column x=64; info column right-aligned to 242."""
+    BASE = top + 44        # shared baseline: minutes / NOW / No buses
+    BX, BY, BW, BH = 8, top + 8, 44, 44
+    LEFT = 64
+    RIGHT_EDGE = 242
+
+    c.fill_round_rect(BX, BY, BW, BH, 6, 1)
+    wline = c.text_width("FreeSansBold12pt7b", line)
+    # 12pt caps are ~17px tall; center-ish in the 44px badge
+    c.text("FreeSansBold12pt7b", BX + (BW - wline) // 2, BY + 30, line, 0)
 
     if minutes < 0:
         c.text("FreeSansBold12pt7b", LEFT, BASE, "No buses" if fetch_ok else "No data", 1)
+        return  # no right column when the row is empty
     elif minutes == 0:
-        c.text("FreeSansBold24pt7b", LEFT, BASE, "NOW", 1)
+        c.text("FreeSansBold18pt7b", LEFT, BASE, "NOW", 1)
     else:
-        x = c.text("FreeSansBold24pt7b", LEFT, BASE, str(minutes), 1)
-        c.text("FreeSansBold12pt7b", x + 6, BASE, "min", 1)
+        x = c.text("FreeSansBold18pt7b", LEFT, BASE, str(minutes), 1)
+        c.text("FreeSansBold12pt7b", x + 5, BASE, "min", 1)
 
-    if minutes2 >= 0:
-        c.text("FreeSans9pt7b", LEFT, SUB_BASE, f"next: {minutes2} min", 1)
-    else:
-        c.text("FreeSans9pt7b", LEFT, SUB_BASE, "Downtown", 1)
+    info = f"next {minutes2}" if minutes2 >= 0 else dest
+    c.text("FreeSans9pt7b", RIGHT_EDGE - c.text_width("FreeSans9pt7b", info), BASE, info, 1)
+
+
+def draw_two_routes(c: Canvas, r1, r2, fetch_ok=True):
+    draw_row(c, 0, LINES[0], DESTS[0], *r1, fetch_ok)
+    c.fill_rect(8, 60, 234, 1, 1)  # divider
+    draw_row(c, 61, LINES[1], DESTS[1], *r2, fetch_ok)
 
 
 if __name__ == "__main__":
+    states = [
+        ((12, 22), (5, 25)),    # both live with next
+        ((7, -1), (0, 14)),     # one next-less, one NOW
+        ((-1, -1), (3, -1)),    # overnight vs single bus
+    ]
     variants = []
-    for args in [(12, 22), (7, -1), (0, 9), (-1, -1)]:
+    for r1, r2 in states:
         c = Canvas()
-        draw_layout_v2(c, *args)
+        draw_two_routes(c, r1, r2)
         variants.append(c)
     out = Path(__file__).parent / "preview_proposed.png"
     write_png(out, variants)
